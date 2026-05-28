@@ -271,6 +271,241 @@ http://localhost:8000/docs
 ```
 
 ---
+# 🗄️ Database Setup (Supabase PostgreSQL)
+
+Vani uses **Supabase PostgreSQL** as its primary database for storing:
+
+* User profiles
+* Conversation history
+* Interview evaluations
+* Tutor sessions
+* Progress analytics
+* Blockchain credentials
+
+---
+
+# 🚀 Setting Up Supabase
+
+## 1. Create a Supabase Project
+
+* Go to https://supabase.com
+* Create a new project
+* Copy:
+
+  * `SUPABASE_URL`
+  * `SUPABASE_SERVICE_KEY`
+
+---
+
+# 🔐 Backend Environment Variables
+
+Add these to your backend `.env`:
+
+```env id="ym6u9m"
+SUPABASE_URL=your_supabase_project_url
+SUPABASE_SERVICE_KEY=your_service_role_key
+```
+
+---
+
+# 🧱 Database Schema
+
+Run the following SQL inside the **Supabase SQL Editor**.
+
+## Open:
+
+```text id="f7ng6z"
+Supabase Dashboard → SQL Editor → New Query
+```
+
+Then paste the schema below and click **Run**.
+
+---
+
+# 📜 SQL Schema
+
+```sql id="bme85w"
+-- Enable UUID generation
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+
+-- =========================
+-- USERS TABLE
+-- =========================
+CREATE TABLE IF NOT EXISTS users (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    phone VARCHAR(15) UNIQUE NOT NULL,
+    name VARCHAR(100),
+    preferred_language VARCHAR(10) DEFAULT 'kn',
+    district VARCHAR(100),
+    is_tutor BOOLEAN DEFAULT FALSE,
+    tutor_verified BOOLEAN DEFAULT FALSE,
+    coins_balance INT DEFAULT 0,
+    created_at TIMESTAMP DEFAULT NOW(),
+    last_active TIMESTAMP DEFAULT NOW()
+);
+
+-- =========================
+-- CONVERSATIONS TABLE
+-- =========================
+CREATE TABLE IF NOT EXISTS conversations (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+    language VARCHAR(10) NOT NULL,
+    user_message TEXT NOT NULL,
+    ai_response TEXT NOT NULL,
+    feedback JSONB,
+    fluency_score FLOAT,
+    pronunciation_score FLOAT,
+    grammar_score FLOAT,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- =========================
+-- INTERVIEWS TABLE
+-- =========================
+CREATE TABLE IF NOT EXISTS interviews (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+    question TEXT NOT NULL,
+    user_answer TEXT NOT NULL,
+    ai_feedback JSONB,
+    question_category VARCHAR(50),
+    difficulty_level INT DEFAULT 1,
+    score FLOAT,
+    strengths JSONB,
+    improvements JSONB,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- =========================
+-- TUTORS TABLE
+-- =========================
+CREATE TABLE IF NOT EXISTS tutors (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+    languages TEXT[] NOT NULL,
+    hourly_rate INT NOT NULL,
+    rating FLOAT DEFAULT 0,
+    total_sessions INT DEFAULT 0,
+    verified BOOLEAN DEFAULT FALSE,
+    bio TEXT,
+    availability JSONB,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- =========================
+-- TUTOR SESSIONS TABLE
+-- =========================
+CREATE TABLE IF NOT EXISTS tutor_sessions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tutor_id UUID REFERENCES tutors(id) ON DELETE CASCADE,
+    learner_id UUID REFERENCES users(id) ON DELETE CASCADE,
+    status VARCHAR(20) DEFAULT 'scheduled',
+    scheduled_at TIMESTAMP,
+    started_at TIMESTAMP,
+    completed_at TIMESTAMP,
+    duration_minutes INT,
+    amount_paid INT,
+    feedback TEXT,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- =========================
+-- PROGRESS TABLE
+-- =========================
+CREATE TABLE IF NOT EXISTS progress (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+    skill VARCHAR(50) NOT NULL,
+    score FLOAT DEFAULT 0,
+    trend FLOAT DEFAULT 0,
+    history JSONB DEFAULT '[]',
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+
+-- =========================
+-- CREDENTIALS TABLE
+-- =========================
+CREATE TABLE IF NOT EXISTS credentials (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+    certificate_id VARCHAR(50) UNIQUE NOT NULL,
+    blockchain_tx_hash VARCHAR(100),
+    level VARCHAR(20),
+    skills JSONB,
+    issued_at TIMESTAMP DEFAULT NOW(),
+    verified BOOLEAN DEFAULT FALSE
+);
+
+-- =========================
+-- INDEXES
+-- =========================
+CREATE INDEX IF NOT EXISTS idx_users_phone
+ON users(phone);
+
+CREATE INDEX IF NOT EXISTS idx_conversations_user
+ON conversations(user_id);
+
+CREATE INDEX IF NOT EXISTS idx_interviews_user
+ON interviews(user_id);
+
+CREATE INDEX IF NOT EXISTS idx_progress_user
+ON progress(user_id);
+```
+
+---
+
+# 🔒 Recommended Supabase Features
+
+## Enable Row Level Security (RLS)
+
+For production deployment:
+
+```sql id="6mv9x3"
+ALTER TABLE users ENABLE ROW LEVEL SECURITY;
+ALTER TABLE conversations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE interviews ENABLE ROW LEVEL SECURITY;
+ALTER TABLE tutors ENABLE ROW LEVEL SECURITY;
+ALTER TABLE tutor_sessions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE progress ENABLE ROW LEVEL SECURITY;
+ALTER TABLE credentials ENABLE ROW LEVEL SECURITY;
+```
+
+---
+
+# 📦 Suggested Storage Buckets
+
+Inside Supabase Storage, create:
+
+| Bucket Name        | Purpose                        |
+| ------------------ | ------------------------------ |
+| `audio-recordings` | User speech recordings         |
+| `profile-images`   | Tutor & learner profile photos |
+| `certificates`     | Generated certificates         |
+
+---
+
+# 📊 Future Database Improvements
+
+* Conversation embeddings for semantic search
+* Analytics event tracking
+* AI confidence scoring tables
+* Tutor reputation system
+* Gamification leaderboard tables
+* Regional language datasets
+
+---
+
+# ✅ Database Ready
+
+Once the schema is executed:
+
+* Backend APIs can connect immediately
+* Supabase auto-generates REST APIs
+* Tables become available in dashboard
+* Authentication can be integrated later
+
+---
 
 # 🧪 Demo Flow
 
