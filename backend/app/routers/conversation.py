@@ -6,7 +6,8 @@ from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel
 from loguru import logger
 
-from app.dependencies import get_current_user 
+from app.dependencies import get_current_user
+from app.database import supabase, cache as redis_client
 from app.services.llm_service import llm_service
 from app.services.feedback_service import feedback_service
 from app.services.progress_service import progress_service

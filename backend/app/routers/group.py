@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from loguru import logger
 
 from app.dependencies import get_current_user
-from app.database import supabase
+from app.database import supabase, cache as redis_client
 from app.websocket_manager import group_manager
 
 router = APIRouter(prefix="/group", tags=["Group Sessions"])

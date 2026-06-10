@@ -5,6 +5,7 @@ from loguru import logger
 
 from app.database import init_cache, close_cache
 from app.routers import auth, speech, conversation, interview, tutor, group, progress
+from app.routers import credential
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -38,6 +39,7 @@ app.include_router(interview.router)
 app.include_router(tutor.router)
 app.include_router(group.router)
 app.include_router(progress.router)
+app.include_router(credential.router)
 
 @app.get("/")
 async def root():
@@ -46,3 +48,7 @@ async def root():
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

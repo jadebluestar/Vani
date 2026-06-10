@@ -11,12 +11,16 @@ export default function LoginPage() {
   const [phone, setPhone] = useState('')
   const [otp, setOtp] = useState('')
   const [countdown, setCountdown] = useState(0)
+  const [devOtp, setDevOtp] = useState(null)
+  const [error, setError] = useState(null)
 
   const handleSendOTP = async (e) => {
     e.preventDefault()
     if (phone.length !== 10) return
-    const success = await sendOTP(`+91${phone}`)
-    if (success) {
+    setError(null)
+    const result = await sendOTP(`+91${phone}`)
+    if (result?.success) {
+      setDevOtp(result.devOtp)
       setStep('otp')
       setCountdown(60)
       const timer = setInterval(() => {
@@ -25,6 +29,8 @@ export default function LoginPage() {
           return prev - 1
         })
       }, 1000)
+    } else {
+      setError(result?.error || 'Failed to send OTP')
     }
   }
 
@@ -68,6 +74,7 @@ export default function LoginPage() {
                 />
               </div>
             </div>
+            {error && <p className="text-sm text-red-500">{error}</p>}
             <button
               type="submit"
               disabled={isLoading || phone.length !== 10}
@@ -90,6 +97,11 @@ export default function LoginPage() {
                 maxLength={6}
                 required
               />
+              {devOtp && (
+                <p className="text-xs text-amber-600 dark:text-amber-400 mt-2 font-mono text-center">
+                  Dev OTP: {devOtp}
+                </p>
+              )}
             </div>
             <button
               type="submit"

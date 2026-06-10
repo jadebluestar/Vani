@@ -7,13 +7,15 @@ export default function OTPLogin({ onSuccess, isLoading: externalLoading }) {
   const [otp, setOtp] = useState('')
   const [countdown, setCountdown] = useState(0)
   const [internalLoading, setInternalLoading] = useState(false)
+  const [devOtp, setDevOtp] = useState(null)
+  const [error, setError] = useState(null)
 
   const isLoading = externalLoading || internalLoading
 
   const handleSendOTP = async (e) => {
     e.preventDefault()
     if (phone.length !== 10) return
-    
+    setError(null)
     setInternalLoading(true)
     try {
       const response = await fetch('/api/auth/otp/send', {
@@ -21,8 +23,10 @@ export default function OTPLogin({ onSuccess, isLoading: externalLoading }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ phone: `+91${phone}` })
       })
-      
+
+      const data = await response.json()
       if (response.ok) {
+        setDevOtp(data.dev_otp || null)
         setStep('otp')
         setCountdown(60)
         const timer = setInterval(() => {
@@ -31,8 +35,11 @@ export default function OTPLogin({ onSuccess, isLoading: externalLoading }) {
             return prev - 1
           })
         }, 1000)
+      } else {
+        setError(data.detail || 'Failed to send OTP')
       }
     } catch (error) {
+      setError('Network error — is the backend running?')
       console.error('Failed to send OTP:', error)
     } finally {
       setInternalLoading(false)
@@ -83,6 +90,9 @@ export default function OTPLogin({ onSuccess, isLoading: externalLoading }) {
             />
           </div>
         </div>
+        {error && (
+          <p className="text-sm text-red-500">{error}</p>
+        )}
         <button
           type="submit"
           disabled={isLoading || phone.length !== 10}
@@ -112,6 +122,11 @@ export default function OTPLogin({ onSuccess, isLoading: externalLoading }) {
         <p className="text-sm text-gray-500 dark:text-gray-400 mt-2">
           Code sent to +91 {phone}
         </p>
+        {devOtp && (
+          <p className="text-xs text-amber-600 dark:text-amber-400 mt-1 font-mono">
+            Dev OTP: {devOtp}
+          </p>
+        )}
       </div>
       <button
         type="submit"

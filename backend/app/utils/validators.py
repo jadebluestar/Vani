@@ -1,5 +1,8 @@
 import re
+import os
 from fastapi import HTTPException, status
+
+_IS_DEV = os.getenv("APP_ENV", "development") == "development"
 
 
 def validate_phone_number(phone: str) -> str:
@@ -11,8 +14,8 @@ def validate_phone_number(phone: str) -> str:
     elif len(phone) == 10:
         phone = "91" + phone
     else:
-        raise HTTPException(status_code=400, detail="Invalid phone number.")
-    if not re.match(r"^91[6-9]\d{9}$", phone):
+        raise HTTPException(status_code=400, detail="Invalid phone number. Must be 10 digits.")
+    if not _IS_DEV and not re.match(r"^91[6-9]\d{9}$", phone):
         raise HTTPException(status_code=400, detail="Invalid Indian mobile number.")
     return "+" + phone
 

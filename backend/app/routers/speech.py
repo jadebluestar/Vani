@@ -7,6 +7,7 @@ from loguru import logger
 from app.dependencies import get_current_user
 from app.services.llm_service import llm_service
 from app.services.feedback_service import feedback_service
+from app.services.whisper_service import whisper_service
 from app.utils.language_codes import SUPPORTED_LANGUAGES
 from app.utils.validators import validate_audio_file_type, validate_language_code
 

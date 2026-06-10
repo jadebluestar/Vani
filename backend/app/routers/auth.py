@@ -45,6 +45,7 @@ def create_jwt_token(user_id: str) -> str:
 
 @router.post("/otp/send")
 async def send_otp(request: OTPSendRequest):
+    logger.info(f"OTP send request received — raw phone: {request.phone!r}")
     phone = validate_phone_number(request.phone)
     rate_key = f"otp_rate:{phone}"
     cache = await get_cache()

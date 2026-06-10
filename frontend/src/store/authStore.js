@@ -29,13 +29,13 @@ export const useAuthStore = create(
       sendOTP: async (phone) => {
         set({ isLoading: true })
         try {
-          await api.post('/auth/otp/send', { phone })
+          const response = await api.post('/auth/otp/send', { phone })
           toast.success('OTP sent successfully')
-          return true
+          return { success: true, devOtp: response.data?.dev_otp || null }
         } catch (error) {
-          // Fallback for mock mode - allow OTP to be sent
-          toast.success('OTP sent (Mock Mode) - Use any 4 digits')
-          return true
+          const detail = error.response?.data?.detail || 'Failed to send OTP'
+          toast.error(detail)
+          return { success: false, error: detail }
         } finally {
           set({ isLoading: false })
         }
@@ -46,24 +46,14 @@ export const useAuthStore = create(
         try {
           const response = await api.post('/auth/otp/verify', { phone, otp })
           const { access_token, user } = response.data
-          set({ 
-            token: access_token, 
-            user, 
-            isAuthenticated: true 
-          })
+          set({ token: access_token, user, isAuthenticated: true })
           api.defaults.headers.common['Authorization'] = `Bearer ${access_token}`
           toast.success('Login successful')
           return true
         } catch (error) {
-          // Fallback to mock user for development
-          set({ 
-            token: MOCK_TOKEN, 
-            user: MOCK_USER, 
-            isAuthenticated: true 
-          })
-          api.defaults.headers.common['Authorization'] = `Bearer ${MOCK_TOKEN}`
-          toast.success('Login successful (Mock Mode)')
-          return true
+          const detail = error.response?.data?.detail || 'Invalid OTP'
+          toast.error(detail)
+          return false
         } finally {
           set({ isLoading: false })
         }
