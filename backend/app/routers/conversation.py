@@ -2,12 +2,14 @@ import uuid
 import json
 from datetime import datetime
 from typing import Optional
-from fastapi import APIRouter, HTTPException, Depends, Query
+from fastapi import APIRouter, HTTPException, Depends, Query, Request, BackgroundTasks
 from pydantic import BaseModel
 from loguru import logger
 
+from app.config import settings
 from app.dependencies import get_current_user
 from app.database import supabase, cache as redis_client
+from app.rate_limiter import limiter
 from app.services.llm_service import llm_service
 from app.services.feedback_service import feedback_service
 from app.services.progress_service import progress_service
@@ -56,17 +58,20 @@ async def start_conversation(
 
 
 @router.post("/respond", summary="Send message and get AI coaching response")
+@limiter.limit(f"{settings.RATE_LIMIT_FREE}/minute")
 async def conversation_respond(
-    request: ConversationRespondRequest,
+    request: Request,
+    body: ConversationRespondRequest,
+    background_tasks: BackgroundTasks,
     current_user: dict = Depends(get_current_user)
 ):
-    user_message = sanitize_text_input(request.user_message, max_length=2000)
-    session_key = f"session:{request.session_id}"
+    user_message = sanitize_text_input(body.user_message, max_length=2000)
+    session_key = f"session:{body.session_id}"
     session_raw = await redis_client.get(session_key)
     if not session_raw:
         raise HTTPException(status_code=404, detail="Session expired or not found.")
     session_data = json.loads(session_raw)
-    language = request.language or session_data.get("language", "en")
+    language = body.language or session_data.get("language", "en")
     history = session_data.get("history", [])
     ai_response = await llm_service.generate_conversation_response(
         user_message=user_message,
@@ -89,21 +94,24 @@ async def conversation_respond(
         "pronunciation_score": feedback.get("pronunciation_score") if feedback else None,
         "grammar_score": feedback.get("grammar_score") if feedback else None,
     }
-    result = supabase.table("conversations").insert(conv_data).execute()
+    result = await supabase.table("conversations").insert(conv_data).execute()
     conversation_id = result.data[0]["id"] if result.data else None
     history.append({"user": user_message, "ai": ai_response})
     session_data["history"] = history[-10:]
     session_data["turn_count"] = session_data.get("turn_count", 0) + 1
     await redis_client.setex(session_key, 3600, json.dumps(session_data))
     if feedback and conversation_id:
-        try:
-            await progress_service.update_skill_scores(current_user["id"], {
+        # Scoring/progress bookkeeping doesn't affect this response — run it after
+        # the response is sent instead of making the user wait on it.
+        background_tasks.add_task(
+            progress_service.update_skill_scores,
+            current_user["id"],
+            {
                 "fluency": feedback.get("fluency_score", 0),
                 "grammar": feedback.get("grammar_score", 0),
                 "pronunciation": feedback.get("pronunciation_score", 0)
-            })
-        except Exception as e:
-            logger.warning(f"Progress update failed: {e}")
+            }
+        )
     return {
         "success": True,
         "conversation_id": conversation_id,
@@ -125,8 +133,8 @@ async def get_conversation_history(
     query = supabase.table("conversations").select("*").eq("user_id", current_user["id"]).order("created_at", desc=True).range(offset, offset + limit - 1)
     if language:
         query = query.eq("language", language)
-    result = query.execute()
-    count_result = supabase.table("conversations").select("id", count="exact").eq("user_id", current_user["id"]).execute()
+    result = await query.execute()
+    count_result = await supabase.table("conversations").select("id", count="exact").eq("user_id", current_user["id"]).execute()
     total = count_result.count or 0
     return {
         "success": True,
@@ -140,7 +148,7 @@ async def save_conversation(
     conversation_id: str,
     current_user: dict = Depends(get_current_user)
 ):
-    result = supabase.table("conversations").select("*").eq("id", conversation_id).eq("user_id", current_user["id"]).execute()
+    result = await supabase.table("conversations").select("*").eq("id", conversation_id).eq("user_id", current_user["id"]).execute()
     if not result.data:
         raise HTTPException(status_code=404, detail="Conversation not found.")
     conv = result.data[0]
@@ -151,7 +159,7 @@ async def save_conversation(
         is_saved = False
     new_feedback = current_saved if isinstance(current_saved, dict) else {}
     new_feedback["_saved"] = not is_saved
-    supabase.table("conversations").update({"feedback": new_feedback}).eq("id", conversation_id).execute()
+    await supabase.table("conversations").update({"feedback": new_feedback}).eq("id", conversation_id).execute()
     return {"success": True, "conversation_id": conversation_id, "saved": not is_saved}
 
 
@@ -160,8 +168,8 @@ async def delete_conversation(
     conversation_id: str,
     current_user: dict = Depends(get_current_user)
 ):
-    result = supabase.table("conversations").select("id").eq("id", conversation_id).eq("user_id", current_user["id"]).execute()
+    result = await supabase.table("conversations").select("id").eq("id", conversation_id).eq("user_id", current_user["id"]).execute()
     if not result.data:
         raise HTTPException(status_code=404, detail="Conversation not found.")
-    supabase.table("conversations").update({"feedback": {"_deleted": True, "_deleted_at": datetime.utcnow().isoformat()}}).eq("id", conversation_id).execute()
+    await supabase.table("conversations").update({"feedback": {"_deleted": True, "_deleted_at": datetime.utcnow().isoformat()}}).eq("id", conversation_id).execute()
     return {"success": True, "message": "Conversation deleted successfully."}

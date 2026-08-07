@@ -11,11 +11,11 @@ class ProgressService:
 
     async def get_user_stats(self, user_id: str) -> Dict[str, Any]:
         try:
-            conv_result = supabase.table("conversations").select("id, created_at, fluency_score, grammar_score, pronunciation_score").eq("user_id", user_id).execute()
+            conv_result = await supabase.table("conversations").select("id, created_at, fluency_score, grammar_score, pronunciation_score").eq("user_id", user_id).execute()
             conversations = conv_result.data or []
-            int_result = supabase.table("interviews").select("id, created_at, score").eq("user_id", user_id).execute()
+            int_result = await supabase.table("interviews").select("id, created_at, score").eq("user_id", user_id).execute()
             interviews = int_result.data or []
-            session_result = supabase.table("tutor_sessions").select("id, created_at, duration_minutes").eq("learner_id", user_id).eq("status", "completed").execute()
+            session_result = await supabase.table("tutor_sessions").select("id, created_at, duration_minutes").eq("learner_id", user_id).eq("status", "completed").execute()
             tutor_sessions = session_result.data or []
             total_sessions = len(conversations) + len(interviews) + len(tutor_sessions)
             practice_minutes = len(conversations) * 5 + len(interviews) * 10 + sum(s.get("duration_minutes", 0) or 0 for s in tutor_sessions)
@@ -77,7 +77,7 @@ class ProgressService:
 
     async def get_skill_breakdown(self, user_id: str) -> Dict[str, Any]:
         try:
-            result = supabase.table("progress").select("*").eq("user_id", user_id).execute()
+            result = await supabase.table("progress").select("*").eq("user_id", user_id).execute()
             progress_records = {r["skill"]: r for r in (result.data or [])}
             skill_data = {}
             for skill in self.SKILL_NAMES:
@@ -95,7 +95,7 @@ class ProgressService:
     async def update_skill_scores(self, user_id: str, scores: Dict[str, float]):
         try:
             for skill, new_score in scores.items():
-                existing = supabase.table("progress").select("*").eq("user_id", user_id).eq("skill", skill).execute()
+                existing = await supabase.table("progress").select("*").eq("user_id", user_id).eq("skill", skill).execute()
                 if existing.data:
                     record = existing.data[0]
                     history = record.get("history", [])
@@ -104,17 +104,17 @@ class ProgressService:
                     recent = [h["score"] for h in history[-5:]]
                     older = [h["score"] for h in history[-10:-5]] if len(history) > 5 else recent
                     trend = (sum(recent) / len(recent)) - (sum(older) / len(older)) if older else 0
-                    supabase.table("progress").update({"score": new_score, "trend": round(trend, 1), "history": history, "updated_at": datetime.utcnow().isoformat()}).eq("id", record["id"]).execute()
+                    await supabase.table("progress").update({"score": new_score, "trend": round(trend, 1), "history": history, "updated_at": datetime.utcnow().isoformat()}).eq("id", record["id"]).execute()
                 else:
-                    supabase.table("progress").insert({"user_id": user_id, "skill": skill, "score": new_score, "trend": 0, "history": [{"score": new_score, "date": datetime.utcnow().isoformat()}]}).execute()
+                    await supabase.table("progress").insert({"user_id": user_id, "skill": skill, "score": new_score, "trend": 0, "history": [{"score": new_score, "date": datetime.utcnow().isoformat()}]}).execute()
         except Exception as e:
             logger.error(f"Error updating skill scores: {e}")
 
     async def get_confidence_timeline(self, user_id: str, days: int = 30) -> List[Dict]:
         try:
             cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
-            conv_result = supabase.table("conversations").select("created_at, fluency_score, grammar_score").eq("user_id", user_id).gte("created_at", cutoff).execute()
-            int_result = supabase.table("interviews").select("created_at, score").eq("user_id", user_id).gte("created_at", cutoff).execute()
+            conv_result = await supabase.table("conversations").select("created_at, fluency_score, grammar_score").eq("user_id", user_id).gte("created_at", cutoff).execute()
+            int_result = await supabase.table("interviews").select("created_at, score").eq("user_id", user_id).gte("created_at", cutoff).execute()
             daily_scores: Dict[str, list] = {}
             for record in (conv_result.data or []):
                 day = record["created_at"][:10]

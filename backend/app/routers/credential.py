@@ -87,7 +87,7 @@ async def generate_credential(
         "verified": False
     }
     
-    result = supabase.table("credentials").insert(credential_data).execute()
+    result = await supabase.table("credentials").insert(credential_data).execute()
     credential = result.data[0]
     
     logger.info(f"Credential generated: {certificate_id} for user {current_user['id'][:8]}")
@@ -117,7 +117,7 @@ async def list_credentials(
     Returns:
         List of credentials
     """
-    result = supabase.table("credentials")\
+    result = await supabase.table("credentials")\
         .select("*")\
         .eq("user_id", current_user["id"])\
         .order("issued_at", desc=True)\
@@ -143,7 +143,7 @@ async def verify_credential(
     Returns:
         Verification result with credential details
     """
-    result = supabase.table("credentials")\
+    result = await supabase.table("credentials")\
         .select("*, users(name, phone)")\
         .eq("certificate_id", certificate_id)\
         .execute()
@@ -185,15 +185,15 @@ async def get_share_link(
     Returns:
         Shareable URL and QR code
     """
-    result = supabase.table("credentials")\
+    result = await supabase.table("credentials")\
         .select("*")\
         .eq("id", credential_id)\
         .eq("user_id", current_user["id"])\
         .execute()
-    
+
     if not result.data:
         raise HTTPException(status_code=404, detail="Credential not found.")
-    
+
     credential = result.data[0]
     base_url = "https://vani.app"
     verify_url = f"{base_url}/verify/{credential['certificate_id']}"
@@ -223,7 +223,7 @@ async def download_credential(
     """
     from fastapi.responses import StreamingResponse
     
-    result = supabase.table("credentials")\
+    result = await supabase.table("credentials")\
         .select("*, users(name)")\
         .eq("id", credential_id)\
         .eq("user_id", current_user["id"])\

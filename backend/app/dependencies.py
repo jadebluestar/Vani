@@ -18,9 +18,9 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
     except JWTError as e:
         raise HTTPException(status_code=401, detail=f"Token validation failed: {str(e)}")
     
-    result = supabase.table("users").select("*").eq("id", user_id).execute()
+    result = await supabase.table("users").select("*").eq("id", user_id).execute()
     if not result.data:
         raise HTTPException(status_code=404, detail="User not found")
-    
-    supabase.table("users").update({"last_active": datetime.utcnow().isoformat()}).eq("id", user_id).execute()
+
+    await supabase.table("users").update({"last_active": datetime.utcnow().isoformat()}).eq("id", user_id).execute()
     return result.data[0]

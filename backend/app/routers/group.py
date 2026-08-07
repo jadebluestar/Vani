@@ -131,7 +131,7 @@ async def group_session_ws(websocket: WebSocket, code: str):
             await websocket.close()
             return
         await group_manager.connect(websocket, code, user_id)
-        user_result = supabase.table("users").select("name").eq("id", user_id).execute()
+        user_result = await supabase.table("users").select("name").eq("id", user_id).execute()
         user_name = (user_result.data[0].get("name") if user_result.data else None) or "Learner"
         await websocket.send_json({"type": "joined", "code": code, "topic": session["topic"]})
         await group_manager.broadcast_to_session({"type": "participant_joined", "user_id": user_id, "name": user_name}, code, exclude=websocket)

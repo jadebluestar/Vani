@@ -1,0 +1,41 @@
+services:
+  redis:
+    image: redis:7-alpine
+    # Not published to the host — only the backend container needs it,
+    # reached over the compose network at redis:6379.
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    volumes:
+      - redis_data:/data
+
+  backend:
+    build: .
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    env_file:
+      - .env
+    environment:
+      # Override values that need to point at the other container instead
+      # of localhost. Supabase/R2/etc still come from .env — if they're
+      # unreachable the app falls back to local SQLite / mock mode, same
+      # as running it outside Docker.
+      - REDIS_URL=redis://redis:6379
+      - VANI_DB_PATH=/data/vani_local.db
+    volumes:
+      - backend_data:/data
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health').read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  redis_data:
+  backend_data:

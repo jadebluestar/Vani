@@ -1,10 +1,12 @@
 import time
-from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException
+from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException, Request, BackgroundTasks
 from pydantic import BaseModel
 from typing import Optional
 from loguru import logger
 
+from app.config import settings
 from app.dependencies import get_current_user
+from app.rate_limiter import limiter
 from app.services.llm_service import llm_service
 from app.services.feedback_service import feedback_service
 from app.services.whisper_service import whisper_service
@@ -27,7 +29,10 @@ class FluencyRequest(BaseModel):
 
 
 @router.post("/transcribe", summary="Transcribe audio to text via Groq Whisper")
+@limiter.limit(f"{settings.RATE_LIMIT_FREE}/minute")
 async def transcribe_audio(
+    request: Request,
+    background_tasks: BackgroundTasks,
     audio: UploadFile = File(...),
     language: Optional[str] = Form(None),
     store_recording: bool = Form(True),
@@ -46,16 +51,15 @@ async def transcribe_audio(
             filename=audio.filename,
             language=language
         )
-        r2_key = None
         if store_recording:
-            try:
-                r2_key = await whisper_service.upload_to_r2(
-                    audio_bytes=audio_bytes,
-                    user_id=current_user["id"],
-                    filename=audio.filename
-                )
-            except Exception as e:
-                logger.warning(f"R2 upload failed (non-critical): {e}")
+            # Archival upload isn't needed for the response — push it to the
+            # background so the user isn't waiting on an R2 round-trip.
+            background_tasks.add_task(
+                whisper_service.upload_to_r2,
+                audio_bytes,
+                current_user["id"],
+                audio.filename
+            )
         response_time = round(time.time() - start_time, 2)
         return {
             "success": True,
@@ -63,7 +67,6 @@ async def transcribe_audio(
             "detected_language": detected_language,
             "duration_seconds": duration,
             "word_count": len(text.split()),
-            "storage_key": r2_key,
             "response_time_seconds": response_time
         }
     except Exception as e:
@@ -72,21 +75,23 @@ async def transcribe_audio(
 
 
 @router.post("/feedback", summary="Get AI speech feedback from text")
+@limiter.limit(f"{settings.RATE_LIMIT_FREE}/minute")
 async def get_speech_feedback(
-    request: FeedbackRequest,
+    request: Request,
+    body: FeedbackRequest,
     current_user: dict = Depends(get_current_user)
 ):
     start_time = time.time()
-    if len(request.text.strip()) < 5:
+    if len(body.text.strip()) < 5:
         raise HTTPException(status_code=400, detail="Text too short for meaningful feedback.")
-    language = validate_language_code(request.language)
+    language = validate_language_code(body.language)
     try:
-        ai_feedback = await llm_service.generate_speech_feedback(request.text, language)
+        ai_feedback = await llm_service.generate_speech_feedback(body.text, language)
         enriched = feedback_service.enrich_feedback(
             ai_feedback=ai_feedback,
-            text=request.text,
+            text=body.text,
             language_code=language,
-            duration_seconds=request.duration_seconds
+            duration_seconds=body.duration_seconds
         )
         response_time = round(time.time() - start_time, 2)
         return {"success": True, "feedback": enriched, "response_time_seconds": response_time}
@@ -96,19 +101,21 @@ async def get_speech_feedback(
 
 
 @router.post("/analyze-fluency", summary="Real-time fluency analysis")
+@limiter.limit(f"{settings.RATE_LIMIT_FREE}/minute")
 async def analyze_fluency(
-    request: FluencyRequest,
+    request: Request,
+    body: FluencyRequest,
     current_user: dict = Depends(get_current_user)
 ):
-    language = validate_language_code(request.language)
-    word_count = len(request.text.split())
-    rate_metrics = feedback_service.calculate_speaking_rate(request.text, request.duration_seconds)
-    filler_metrics = feedback_service.count_filler_words(request.text, language)
+    language = validate_language_code(body.language)
+    word_count = len(body.text.split())
+    rate_metrics = feedback_service.calculate_speaking_rate(body.text, body.duration_seconds)
+    filler_metrics = feedback_service.count_filler_words(body.text, language)
     try:
         ai_analysis = await llm_service.analyze_fluency(
-            text=request.text,
+            text=body.text,
             word_count=word_count,
-            duration_seconds=request.duration_seconds,
+            duration_seconds=body.duration_seconds,
             language_code=language
         )
     except Exception as e:

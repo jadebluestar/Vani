@@ -29,7 +29,7 @@ async def mint_credential(
         Transaction hash and explorer URL
     """
     # Get credential from database
-    result = supabase.table("credentials")\
+    result = await supabase.table("credentials")\
         .select("*")\
         .eq("id", request.credential_id)\
         .eq("user_id", current_user["id"])\
@@ -52,7 +52,7 @@ async def mint_credential(
         )
         
         # Update credential with transaction hash
-        supabase.table("credentials")\
+        await supabase.table("credentials")\
             .update({
                 "blockchain_tx_hash": tx_hash,
                 "verified": True

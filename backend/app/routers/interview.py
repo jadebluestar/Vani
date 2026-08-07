@@ -2,12 +2,14 @@ import json
 import uuid
 from datetime import datetime
 from typing import Optional
-from fastapi import APIRouter, HTTPException, Depends, Query, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, Depends, Query, Request, BackgroundTasks, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 from loguru import logger
 
+from app.config import settings
 from app.dependencies import get_current_user
 from app.database import supabase
+from app.rate_limiter import limiter
 from app.services.llm_service import llm_service
 from app.services.progress_service import progress_service
 from app.websocket_manager import interview_manager
@@ -71,15 +73,18 @@ async def get_questions(
 
 
 @router.post("/respond", summary="Submit interview answer and get feedback")
+@limiter.limit(f"{settings.RATE_LIMIT_FREE}/minute")
 async def interview_respond(
-    request: InterviewRespondRequest,
+    request: Request,
+    body: InterviewRespondRequest,
+    background_tasks: BackgroundTasks,
     current_user: dict = Depends(get_current_user)
 ):
-    user_answer = sanitize_text_input(request.user_answer, max_length=3000)
-    language = validate_language_code(request.language)
-    question_text = request.question_text
-    if not question_text and request.question_id:
-        q_match = next((q for q in INTERVIEW_QUESTIONS if q["id"] == request.question_id), None)
+    user_answer = sanitize_text_input(body.user_answer, max_length=3000)
+    language = validate_language_code(body.language)
+    question_text = body.question_text
+    if not question_text and body.question_id:
+        q_match = next((q for q in INTERVIEW_QUESTIONS if q["id"] == body.question_id), None)
         question_text = q_match["question"] if q_match else "Tell me about yourself."
     if not question_text:
         question_text = "Tell me about yourself."
@@ -87,8 +92,8 @@ async def interview_respond(
         evaluation = await llm_service.evaluate_interview_answer(
             question=question_text,
             answer=user_answer,
-            category=request.category,
-            difficulty=request.difficulty,
+            category=body.category,
+            difficulty=body.difficulty,
             language_code=language
         )
         score = evaluation.get("score", 50)
@@ -97,22 +102,23 @@ async def interview_respond(
             "question": question_text,
             "user_answer": user_answer,
             "ai_feedback": json.dumps(evaluation),
-            "question_category": request.category,
-            "difficulty_level": request.difficulty,
+            "question_category": body.category,
+            "difficulty_level": body.difficulty,
             "score": score,
             "strengths": evaluation.get("strengths", []),
             "improvements": evaluation.get("improvements", [])
         }
-        result = supabase.table("interviews").insert(interview_data).execute()
+        result = await supabase.table("interviews").insert(interview_data).execute()
         interview_id = result.data[0]["id"] if result.data else None
-        try:
-            await progress_service.update_skill_scores(current_user["id"], {
+        background_tasks.add_task(
+            progress_service.update_skill_scores,
+            current_user["id"],
+            {
                 "speaking": score,
                 "vocabulary": evaluation.get("content_score", score),
                 "fluency": evaluation.get("communication_score", score)
-            })
-        except Exception as e:
-            logger.warning(f"Progress update failed: {e}")
+            }
+        )
         return {"success": True, "interview_id": interview_id, "score": score, "evaluation": evaluation, "question": question_text}
     except Exception as e:
         logger.error(f"Interview evaluation error: {e}")
@@ -124,7 +130,7 @@ async def get_interview_feedback(
     interview_id: str,
     current_user: dict = Depends(get_current_user)
 ):
-    result = supabase.table("interviews").select("*").eq("id", interview_id).eq("user_id", current_user["id"]).execute()
+    result = await supabase.table("interviews").select("*").eq("id", interview_id).eq("user_id", current_user["id"]).execute()
     if not result.data:
         raise HTTPException(status_code=404, detail="Interview record not found.")
     record = result.data[0]
@@ -181,7 +187,7 @@ async def live_interview_ws(websocket: WebSocket, session_id: str):
                     evaluation = await llm_service.evaluate_interview_answer(question=current_q, answer=answer, category=category, difficulty=difficulty, language_code=language)
                     score = evaluation.get("score", 50)
                     meta["scores"].append(score)
-                    supabase.table("interviews").insert({"user_id": user_id, "question": current_q, "user_answer": answer, "ai_feedback": json.dumps(evaluation), "question_category": category, "difficulty_level": difficulty, "score": score}).execute()
+                    await supabase.table("interviews").insert({"user_id": user_id, "question": current_q, "user_answer": answer, "ai_feedback": json.dumps(evaluation), "question_category": category, "difficulty_level": difficulty, "score": score}).execute()
                     await websocket.send_json({"type": "feedback", "score": score, "evaluation": evaluation, "question_num": meta["question_num"]})
                     if meta["question_num"] >= 5:
                         avg_score = sum(meta["scores"]) / len(meta["scores"]) if meta["scores"] else 0
@@ -220,7 +226,7 @@ async def get_interview_history(
     query = supabase.table("interviews").select("id, question, score, question_category, difficulty_level, strengths, improvements, created_at").eq("user_id", current_user["id"]).order("created_at", desc=True).range(offset, offset + limit - 1)
     if category:
         query = query.eq("question_category", category)
-    result = query.execute()
+    result = await query.execute()
     records = result.data or []
     for r in records:
         for field in ["strengths", "improvements"]:
@@ -229,7 +235,7 @@ async def get_interview_history(
                     r[field] = json.loads(r[field])
                 except Exception:
                     pass
-    count_result = supabase.table("interviews").select("id", count="exact").eq("user_id", current_user["id"]).execute()
+    count_result = await supabase.table("interviews").select("id", count="exact").eq("user_id", current_user["id"]).execute()
     total = count_result.count or 0
     avg_score = sum(r["score"] for r in records if r.get("score")) / len(records) if records else 0
     return {"success": True, "interviews": records, "average_score": round(avg_score, 1), "pagination": {"page": page, "per_page": limit, "total": total, "pages": (total + limit - 1) // limit}}

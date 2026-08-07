@@ -2,7 +2,7 @@ import random
 import string
 from datetime import datetime, timedelta
 from typing import Optional
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel
 from jose import jwt
 from loguru import logger
@@ -11,6 +11,7 @@ from app.config import settings
 from app.utils.validators import validate_phone_number
 from app.database import supabase, get_cache
 from app.dependencies import get_current_user
+from app.rate_limiter import limiter
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -44,56 +45,61 @@ def create_jwt_token(user_id: str) -> str:
 
 
 @router.post("/otp/send")
-async def send_otp(request: OTPSendRequest):
-    logger.info(f"OTP send request received — raw phone: {request.phone!r}")
-    phone = validate_phone_number(request.phone)
+@limiter.limit("5/minute")
+async def send_otp(request: Request, body: OTPSendRequest):
+    logger.info(f"OTP send request received — raw phone: {body.phone!r}")
+    phone = validate_phone_number(body.phone)
     rate_key = f"otp_rate:{phone}"
     cache = await get_cache()
-    
+
     attempts = await cache.get(rate_key)
     if attempts and int(attempts) >= 3:
         raise HTTPException(status_code=429, detail="Too many OTP requests. Please wait 10 minutes.")
-    
+
     otp = generate_otp()
     await cache.setex(f"otp:{phone}", 300, otp)
     await cache.incr(rate_key)
     await cache.expire(rate_key, 600)
-    
+
     logger.info(f"OTP for {phone}: {otp}")
-    
+
     masked_phone = phone[:4] + "****" + phone[-3:]
-    return {
+    response = {
         "success": True,
         "message": f"OTP sent to {masked_phone}",
         "expires_in": 300,
-        "dev_otp": otp
     }
+    # Never leak the OTP in a real deployment — only convenient for local/dev testing.
+    if settings.APP_ENV == "development":
+        response["dev_otp"] = otp
+    return response
 
 
 @router.post("/otp/verify", response_model=TokenResponse)
-async def verify_otp(request: OTPVerifyRequest):
-    phone = validate_phone_number(request.phone)
+@limiter.limit("10/minute")
+async def verify_otp(request: Request, body: OTPVerifyRequest):
+    phone = validate_phone_number(body.phone)
     cache = await get_cache()
-    
+
     stored_otp = await cache.get(f"otp:{phone}")
     if not stored_otp:
         raise HTTPException(status_code=400, detail="OTP expired or not found.")
-    if stored_otp != request.otp:
+    if stored_otp != body.otp:
         raise HTTPException(status_code=400, detail="Invalid OTP.")
     
     await cache.delete(f"otp:{phone}")
 
-    existing = supabase.table("users").select("*").eq("phone", phone).execute()
+    existing = await supabase.table("users").select("*").eq("phone", phone).execute()
     if existing.data:
         user = existing.data[0]
     else:
         new_user = {
             "phone": phone,
-            "name": request.name,
-            "preferred_language": request.preferred_language or "kn",
+            "name": body.name,
+            "preferred_language": body.preferred_language or "kn",
             "coins_balance": 100
         }
-        result = supabase.table("users").insert(new_user).execute()
+        result = await supabase.table("users").insert(new_user).execute()
         user = result.data[0]
         logger.info(f"New user created: {user['id']}")
 

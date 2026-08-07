@@ -1,3 +1,5 @@
+import asyncio
+import os
 import sqlite3
 import uuid
 import json
@@ -7,10 +9,10 @@ from typing import Optional, Dict, Any, List
 from loguru import logger
 
 
-# ─── In-memory cache (replaces Redis) ────────────────────────────────────────
+# ─── Cache: real Redis if reachable, else an in-memory fallback ───────────────
 
 class SimpleCache:
-    """Simple in-memory cache (replaces Redis for prototyping)"""
+    """In-memory cache used when Redis is unavailable (e.g. local/offline dev)."""
 
     def __init__(self):
         self._data: Dict[str, Any] = {}
@@ -50,7 +52,41 @@ class SimpleCache:
                 self._expiry.pop(key, None)
 
 
-cache = SimpleCache()
+class CacheProxy:
+    """
+    Delegates to whichever backend is active (real Redis or SimpleCache).
+    Routers do `from app.database import cache as redis_client` at import
+    time, so `init_cache()` must swap `self._impl` on this same object
+    rather than rebinding the module-level `cache` name — reassigning the
+    name wouldn't be visible to modules that already imported it by reference.
+    """
+
+    def __init__(self):
+        self._impl = SimpleCache()
+
+    async def get(self, key: str):
+        return await self._impl.get(key)
+
+    async def setex(self, key: str, seconds: int, value: str):
+        return await self._impl.setex(key, seconds, value)
+
+    async def set(self, key: str, value: str):
+        return await self._impl.set(key, value)
+
+    async def incr(self, key: str):
+        return await self._impl.incr(key)
+
+    async def expire(self, key: str, seconds: int):
+        return await self._impl.expire(key, seconds)
+
+    async def delete(self, key: str):
+        return await self._impl.delete(key)
+
+    async def ping(self):
+        return await self._impl.ping()
+
+
+cache = CacheProxy()
 redis_client = cache  # alias used by some routers
 
 
@@ -59,16 +95,33 @@ async def get_cache():
 
 
 async def init_cache():
-    logger.info("Using in-memory cache (Redis not required)")
+    """Tries to connect to real Redis; falls back to the in-memory cache if unreachable."""
+    try:
+        import redis.asyncio as aioredis
+        from app.config import settings
+        client = aioredis.from_url(
+            settings.REDIS_URL, decode_responses=True, socket_connect_timeout=2
+        )
+        await client.ping()
+        cache._impl = client
+        logger.info(f"Connected to Redis at {settings.REDIS_URL}")
+    except Exception as e:
+        logger.warning(f"Redis unreachable ({type(e).__name__}), using in-memory cache")
 
 
 async def close_cache():
+    if isinstance(cache._impl, SimpleCache):
+        return
+    try:
+        await cache._impl.aclose()
+    except Exception:
+        pass
     logger.info("Cache closed")
 
 
 # ─── SQLite local database (Supabase-compatible interface) ────────────────────
 
-_SQLITE_DB_PATH = "vani_local.db"
+_SQLITE_DB_PATH = os.environ.get("VANI_DB_PATH", "vani_local.db")
 
 _INIT_SQL = """
 CREATE TABLE IF NOT EXISTS users (
@@ -162,6 +215,16 @@ CREATE TABLE IF NOT EXISTS credentials (
     created_at TEXT DEFAULT (datetime('now')),
     verified INTEGER DEFAULT 0
 );
+
+-- Every list/history query filters or sorts on these columns; without an index
+-- each one is a full table scan (visible via EXPLAIN QUERY PLAN).
+CREATE INDEX IF NOT EXISTS idx_conversations_user_created ON conversations (user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_interviews_user_created ON interviews (user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_tutor_sessions_learner ON tutor_sessions (learner_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_tutor_sessions_tutor ON tutor_sessions (tutor_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_tutors_verified_rating ON tutors (verified, rating DESC);
+CREATE INDEX IF NOT EXISTS idx_progress_user_skill ON progress (user_id, skill);
+CREATE INDEX IF NOT EXISTS idx_credentials_user ON credentials (user_id);
 """
 
 # Fields that should be parsed from JSON strings back to Python objects
@@ -337,7 +400,10 @@ class SQLiteQueryBuilder:
         if "id" not in data or not data["id"]:
             data["id"] = str(uuid.uuid4())
         now = datetime.utcnow().isoformat()
-        if "created_at" not in data:
+        # "progress" has no created_at column (it tracks updated_at instead) —
+        # stamping it here caused every progress insert to fail with a
+        # "no column named created_at" error.
+        if self._table != "progress" and "created_at" not in data:
             data["created_at"] = now
         if self._table == "users" and "last_active" not in data:
             data["last_active"] = now
@@ -399,6 +465,45 @@ class LocalDB:
         return SQLiteQueryBuilder(self._db_path, name)
 
 
+# ─── Async wrapper: keeps the sync sqlite3/supabase-py calls off the event loop ─
+
+class AsyncQueryBuilder:
+    """
+    Wraps a synchronous query builder (LocalDB's SQLiteQueryBuilder, or a real
+    supabase-py builder) so `.execute()` runs in a worker thread instead of
+    blocking the event loop. Filter/chain methods (`.eq()`, `.select()`, ...)
+    are cheap in-memory calls, so they stay synchronous and just re-wrap the
+    builder they return — only `.execute()` does real (blocking) I/O.
+    """
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    async def execute(self):
+        return await asyncio.to_thread(self._inner.execute)
+
+    def __getattr__(self, name):
+        attr = getattr(self._inner, name)
+        if not callable(attr):
+            return attr
+
+        def _call(*args, **kwargs):
+            result = attr(*args, **kwargs)
+            return AsyncQueryBuilder(result) if result is self._inner else result
+
+        return _call
+
+
+class AsyncDB:
+    """Wraps LocalDB or a real supabase-py Client behind one async-safe interface."""
+
+    def __init__(self, impl):
+        self._impl = impl
+
+    def table(self, name: str) -> AsyncQueryBuilder:
+        return AsyncQueryBuilder(self._impl.table(name))
+
+
 # ─── Database selection: Supabase if reachable, else local SQLite ─────────────
 
 def _try_supabase():
@@ -415,7 +520,7 @@ def _try_supabase():
 
 
 _sb = _try_supabase()
-supabase = _sb if _sb is not None else LocalDB()
+supabase = AsyncDB(_sb if _sb is not None else LocalDB())
 
 
 def get_supabase():

@@ -1,11 +1,14 @@
 import json
 import re
 import random
+import time
 from typing import Optional, Dict, Any
 from loguru import logger
 import httpx
+from tenacity import AsyncRetrying, stop_after_attempt, wait_exponential, retry_if_exception
 
 try:
+    import groq
     from groq import AsyncGroq
     _GROQ_AVAILABLE = True
 except ImportError:
@@ -15,6 +18,66 @@ from app.config import settings
 
 _OPENROUTER_BASE = "https://openrouter.ai/api/v1"
 _OPENROUTER_MODEL = "meta-llama/llama-3.3-70b-instruct"
+
+# Errors worth retrying: timeouts, connection drops, 429s, and 5xx — all
+# transient. Auth/validation errors (4xx other than 429) are not retried
+# since a retry can't fix a bad API key or a malformed request.
+_RETRYABLE_TRANSPORT_ERRORS = tuple(
+    exc for exc in (
+        httpx.TimeoutException,
+        httpx.ConnectError,
+        getattr(groq, "APIConnectionError", None) if _GROQ_AVAILABLE else None,
+        getattr(groq, "APITimeoutError", None) if _GROQ_AVAILABLE else None,
+        getattr(groq, "RateLimitError", None) if _GROQ_AVAILABLE else None,
+        getattr(groq, "InternalServerError", None) if _GROQ_AVAILABLE else None,
+    )
+    if exc is not None
+)
+
+
+def _is_retryable(exc: BaseException) -> bool:
+    if isinstance(exc, _RETRYABLE_TRANSPORT_ERRORS):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code == 429 or exc.response.status_code >= 500
+    return False
+
+
+class _CircuitBreaker:
+    """
+    Trips after consecutive upstream failures. While open, calls skip the
+    network entirely and fall straight through to the mock response instead
+    of paying (retry attempts x timeout) latency on every request during an
+    LLM provider outage. Half-opens after `recovery_seconds` to probe recovery.
+    """
+
+    def __init__(self, failure_threshold: int = 5, recovery_seconds: float = 30.0):
+        self._failure_threshold = failure_threshold
+        self._recovery_seconds = recovery_seconds
+        self._consecutive_failures = 0
+        self._opened_at: Optional[float] = None
+
+    def allow_request(self) -> bool:
+        if self._opened_at is None:
+            return True
+        if time.monotonic() - self._opened_at >= self._recovery_seconds:
+            return True
+        return False
+
+    def record_success(self):
+        if self._consecutive_failures or self._opened_at:
+            logger.info("LLM circuit breaker reset after successful call")
+        self._consecutive_failures = 0
+        self._opened_at = None
+
+    def record_failure(self):
+        self._consecutive_failures += 1
+        if self._consecutive_failures >= self._failure_threshold and self._opened_at is None:
+            self._opened_at = time.monotonic()
+            logger.warning(
+                f"LLM circuit breaker OPEN after {self._consecutive_failures} consecutive failures "
+                f"— falling back to mock responses for {self._recovery_seconds}s"
+            )
 
 
 # ─── Mock responses used when Groq is unavailable ────────────────────────────
@@ -82,6 +145,7 @@ class LLMService:
         self._backend = None  # "openrouter" | "groq" | None
         self.model = "llama-3.3-70b-versatile"
         self.max_tokens = 2048
+        self._breaker = _CircuitBreaker(failure_threshold=5, recovery_seconds=30.0)
         key = settings.GROQ_API_KEY or ""
 
         if key.startswith("sk-or-"):
@@ -108,24 +172,46 @@ class LLMService:
     ) -> str:
         if self._mock_mode:
             return random.choice(_MOCK_CONVERSATION_REPLIES)
+
+        if not self._breaker.allow_request():
+            logger.warning("LLM circuit breaker open — skipping call, returning mock response")
+            return random.choice(_MOCK_CONVERSATION_REPLIES)
+
         messages = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
+
+        call = self._generate_openrouter if self._backend == "openrouter" else self._generate_groq
         try:
-            if self._backend == "openrouter":
-                return await self._generate_openrouter(messages, temperature, max_tokens)
-            else:
-                response = await self._client.chat.completions.create(
-                    model=self.model,
-                    messages=messages,
-                    temperature=temperature,
-                    max_tokens=max_tokens or self.max_tokens,
-                )
-                return response.choices[0].message.content.strip()
+            result = await self._call_with_retry(call, messages, temperature, max_tokens)
+            self._breaker.record_success()
+            return result
         except Exception as e:
-            logger.error(f"LLM error ({self._backend}): {e} — returning mock response")
+            self._breaker.record_failure()
+            logger.error(f"LLM error ({self._backend}) after retries: {e} — returning mock response")
             return random.choice(_MOCK_CONVERSATION_REPLIES)
+
+    @staticmethod
+    async def _call_with_retry(func, *args):
+        """Retries transient upstream errors (timeouts, 429, 5xx) with exponential backoff."""
+        async for attempt in AsyncRetrying(
+            stop=stop_after_attempt(3),
+            wait=wait_exponential(multiplier=0.5, min=0.5, max=4),
+            retry=retry_if_exception(_is_retryable),
+            reraise=True,
+        ):
+            with attempt:
+                return await func(*args)
+
+    async def _generate_groq(self, messages: list, temperature: float, max_tokens=None) -> str:
+        response = await self._client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens or self.max_tokens,
+        )
+        return response.choices[0].message.content.strip()
 
     async def _generate_openrouter(self, messages: list, temperature: float, max_tokens=None) -> str:
         key = settings.GROQ_API_KEY
